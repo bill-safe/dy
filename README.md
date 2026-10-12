@@ -31,8 +31,7 @@
 1. 下载脚本：
  
    ```bash
-   wget https://example.com/dy.sh
-   # 或者直接复制到服务器上
+   bash <(curl -sL https://raw.githubusercontent.com/bill-safe/dy/refs/heads/main/dy.sh)
    ```
 
 2. 赋予执行权限并运行：
