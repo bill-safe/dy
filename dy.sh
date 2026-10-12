@@ -1,5 +1,5 @@
 cat << 'DYEOF' > /usr/local/bin/dy
-#!/bash/bin
+#!/bin/bash
 SUB_DIR="/var/www/sub"
 CADDYFILE="/etc/caddy/Caddyfile"
 
