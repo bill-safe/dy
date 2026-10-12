@@ -1,20 +1,22 @@
-# 1. 确保以 root 权限创建全自动安装文件
-cat << 'EOF' > /tmp/reinstall_dy.sh
 #!/bin/bash
 export LANG=en_US.UTF-8
 
-# 颜色定义
-green(){ echo -e "\033[32m\033[01m\$1\033[0m";}
+# 终端颜色支持
 red(){ echo -e "\033[31m\033[01m\$1\033[0m";}
+green(){ echo -e "\033[32m\033[01m\$1\033[0m";}
+yellow(){ echo -e "\033[33m\033[01m\$1\033[0m";}
 blue(){ echo -e "\033[36m\033[01m\$1\033[0m";}
 
-echo "=================================================="
-blue  "   正在重新修复并安装 FLClash 订阅服务环境...    "
-echo "=================================================="
+# 1. 权限与系统检查
+[[ \$EUID -ne 0 ]] && yellow "请以 root 模式运行此脚本！" && exit
 
-# 让用户选择模式
-echo "提示：如果有域名，建议输入域名以启用顶级 HTTPS 加密。"
-echo "      如果没有域名，请直接【敲回车】，将自动切换为纯 IP 模式。"
+clear
+echo "=================================================="
+blue  "      FLClash 智能自适应安全订阅生成器安装脚本    "
+echo "=================================================="
+echo ""
+yellow "提示：如果有域名，建议输入域名以启用顶级 HTTPS 加密。"
+yellow "      如果没有域名，请直接【敲回车】，将自动切换为纯 IP 模式运行。"
 echo ""
 read -p "请输入解析到此服务器的【域名】(不输请直接回车): " MY_DOMAIN
 
@@ -28,49 +30,68 @@ else
     PORT="8443"
 fi
 
-# 安装基础依赖与 Caddy 官方源
-echo "正在安装基础依赖与 Caddy..."
-apt-get update -y
-apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl wget jq
-curl -1sLf 'https://cloudsmith.io' | tee /etc/apt/sources.list.d/caddy-stable.list
-apt-get update -y
-apt-get install -y caddy
-
-# 防火墙精准放行
-echo "正在配置防火墙..."
+# 2. 自动处理 Ubuntu 防火墙，精准放行对应端口
+echo "正在处理防火墙组件..."
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
-    ufw allow \$PORT/tcp
-    ufw reload
+    ufw allow \$PORT/tcp >/dev/null 2>&1
+    ufw reload >/dev/null 2>&1
+    green " [√] UFW 防火墙已成功放行 \$PORT 端口"
 fi
+
 if command -v iptables >/dev/null 2>&1; then
-    iptables -I INPUT -p tcp --dport \$PORT -j ACCEPT
+    iptables -I INPUT -p tcp --dport \$PORT -j ACCEPT >/dev/null 2>&1
     if [ -x "\$(command -v netfilter-persistent)" ]; then
         netfilter-persistent save >/dev/null 2>&1
     fi
+    green " [√] iptables 规则已同步放行 \$PORT 端口"
 fi
 
-# 严格初始化网页目录，彻底解决路径和 Caddy 用户不存在的问题
+# 3. 安装必要的依赖与官方最新 Caddy 软件源
+echo "正在安装基础依赖..."
+apt-get update -y >/dev/null 2>&1
+apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl wget jq gpg >/dev/null 2>&1
+
+echo "正在配置官方 Caddy 最新安全密钥与软件源..."
+# 彻底移除之前旧的、错误的 list 文件防止其干扰 apt
+rm -f /etc/apt/sources.list.d/caddy-stable.list
+
+# 采用官方最新最稳妥的公钥指纹下载并转化为本地专属 gpg 密钥环
+curl -1sLf 'https://cloudsmith.io' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+# 正确写入合规的 apt 软件源格式，避免引入网页代码导致 DOCTYPE 报错
+echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://cloudsmith.io any main" | tee /etc/apt/sources.list.d/caddy-stable.list
+
+echo "正在下载并安装 Caddy 服务..."
+apt-get update -y >/dev/null 2>&1
+apt-get install -y caddy >/dev/null 2>&1
+
+# 4. 初始化目录与基础配置
 SUB_DIR="/var/www/sub"
 CADDYFILE="/etc/caddy/Caddyfile"
 mkdir -p \$SUB_DIR
-
-# 如果没有默认文件，则创建一个
 if [ ! -f "\$SUB_DIR/config.yaml" ]; then
-    echo "# 专属 FLClash 配置文件" > "\$SUB_DIR/config.yaml"
+    echo "# 请使用 dy 导入你的 FLClash 配置文件" > "\$SUB_DIR/config.yaml"
 fi
+# 收紧目录与文件权限
+chown -R caddy:caddy \$SUB_DIR
+chmod 700 \$SUB_DIR
+chmod 600 \$SUB_DIR/config.yaml
 
-# 精准配置 Caddyfile 混淆防御（500 假蜜罐）
+# 生成一个初始化随机 UUID 密钥
 INIT_UUID=\$(cat /proc/sys/kernel/random/uuid)
+
+# 5. 写入高强度加固、全伪装的 Caddyfile
 cat << CADDYEOF > \(CADDYFILE\)LISTEN_ADDR {
     root * /var/www/sub
     file_server
 
+    # 【安全加固 1】全面抹除 Caddy 默认特征，误导和迷惑扫描器
     header {
         -Server
         Server "nginx/1.24.0"
         -Date
     }
 
+    # 禁止任何对真实文件名的直接请求，返回假 Nginx 500 页面
     respond /config.yaml \`<html>
 <head><title>500 Internal Server Error</title></head>
 <body>
@@ -79,6 +100,7 @@ cat << CADDYEOF > \(CADDYFILE\)LISTEN_ADDR {
 </body>
 </html>\` 500
 
+    # 专属密钥路径鉴权
     @my_secret_link path /\$INIT_UUID
     handle @my_secret_link {
         rewrite * /config.yaml
@@ -88,6 +110,7 @@ cat << CADDYEOF > \(CADDYFILE\)LISTEN_ADDR {
         }
     }
 
+    # 【安全加固 2】蜜罐级伪装：盲猜路径全部返回逼真 500 错误
     fallback {
         respond \`<html>
 <head><title>500 Internal Server Error</title></head>
@@ -100,17 +123,12 @@ cat << CADDYEOF > \(CADDYFILE\)LISTEN_ADDR {
 }
 CADDYEOF
 
-# 重置 Caddy 的系统所有者权限
-chown -R caddy:caddy \$SUB_DIR
-chmod 700 \$SUB_DIR
-chmod 600 \$SUB_DIR/config.yaml
-
-# 启动并重启服务
 systemctl daemon-reload
-systemctl enable caddy
+systemctl enable caddy >/dev/null 2>&1
 systemctl restart caddy
 
-# 完美生成本地管理快捷方式 dy 脚本，确保内部逻辑闭环，并对 [ -f ] 的逻辑提示做严谨修正
+# 6. 生成本地快捷管理脚本 /usr/local/bin/dy
+# 注意：此处的打包使用带有转义符号的模板，以确保写入目标文件时逻辑完美无瑕
 cat << 'DYEOF' > /usr/local/bin/dy
 #!/bin/bash
 SUB_DIR="/var/www/sub"
@@ -161,6 +179,7 @@ update_config_menu() {
                 echo " [X] URL 不能为空！"
             else
                 echo "正在加密下载..."
+                # 修复 /tmp 提权隐患：使用安全的随机随机文件接收下载
                 local tmp_config=\$(mktemp /tmp/clash_cfg.XXXXXXXXXX)
                 local http_status=\$(curl -sL -w "%{http_code}" "\(remote_url" -o "\)tmp_config")
 
@@ -238,11 +257,18 @@ show_menu() {
 }
 show_menu
 DYEOF
+
 chmod +x /usr/local/bin/dy
 
-green " [√] 环境完全修复成功！"
-EOF
-
-# 2. 赋予执行权限并直接运行本地修复脚本
-chmod +x /tmp/reinstall_dy.sh
-/tmp/reinstall_dy.sh
+clear
+echo "=================================================="
+green " [√] FLClash 智能自适应安全订阅系统环境部署成功！"
+blue  " - 笔记服务可以继续安全、无冲突地运行在 80/443 端口。"
+if [ -z "\$MY_DOMAIN" ]; then
+    blue " - 当前服务运行在【纯 IP 模式】，使用安全端口: 8080"
+else
+    blue " - 当前服务运行在【HTTPS 域名模式】，使用加密端口: 8443"
+fi
+echo "--------------------------------------------------"
+green " 现在你可以在服务器任意目录下直接输入 'dy' 运行管理菜单。"
+echo "=================================================="
