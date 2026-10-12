@@ -1,23 +1,135 @@
+# 1. 确保以 root 权限创建全自动安装文件
+cat << 'EOF' > /tmp/reinstall_dy.sh
+#!/bin/bash
+export LANG=en_US.UTF-8
+
+# 颜色定义
+green(){ echo -e "\033[32m\033[01m\$1\033[0m";}
+red(){ echo -e "\033[31m\033[01m\$1\033[0m";}
+blue(){ echo -e "\033[36m\033[01m\$1\033[0m";}
+
+echo "=================================================="
+blue  "   正在重新修复并安装 FLClash 订阅服务环境...    "
+echo "=================================================="
+
+# 让用户选择模式
+echo "提示：如果有域名，建议输入域名以启用顶级 HTTPS 加密。"
+echo "      如果没有域名，请直接【敲回车】，将自动切换为纯 IP 模式。"
+echo ""
+read -p "请输入解析到此服务器的【域名】(不输请直接回车): " MY_DOMAIN
+
+if [ -z "\$MY_DOMAIN" ]; then
+    blue " [!] 未输入域名，自动切换为【纯 IP 模式】运行。"
+    LISTEN_ADDR=":8080"
+    PORT="8080"
+else
+    green " [√] 检测到域名，将自动切换为【HTTPS 域名模式】运行。"
+    LISTEN_ADDR="\$MY_DOMAIN:8443"
+    PORT="8443"
+fi
+
+# 安装基础依赖与 Caddy 官方源
+echo "正在安装基础依赖与 Caddy..."
+apt-get update -y
+apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl wget jq
+curl -1sLf 'https://cloudsmith.io' | tee /etc/apt/sources.list.d/caddy-stable.list
+apt-get update -y
+apt-get install -y caddy
+
+# 防火墙精准放行
+echo "正在配置防火墙..."
+if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
+    ufw allow \$PORT/tcp
+    ufw reload
+fi
+if command -v iptables >/dev/null 2>&1; then
+    iptables -I INPUT -p tcp --dport \$PORT -j ACCEPT
+    if [ -x "\$(command -v netfilter-persistent)" ]; then
+        netfilter-persistent save >/dev/null 2>&1
+    fi
+fi
+
+# 严格初始化网页目录，彻底解决路径和 Caddy 用户不存在的问题
+SUB_DIR="/var/www/sub"
+CADDYFILE="/etc/caddy/Caddyfile"
+mkdir -p \$SUB_DIR
+
+# 如果没有默认文件，则创建一个
+if [ ! -f "\$SUB_DIR/config.yaml" ]; then
+    echo "# 专属 FLClash 配置文件" > "\$SUB_DIR/config.yaml"
+fi
+
+# 精准配置 Caddyfile 混淆防御（500 假蜜罐）
+INIT_UUID=\$(cat /proc/sys/kernel/random/uuid)
+cat << CADDYEOF > \(CADDYFILE\)LISTEN_ADDR {
+    root * /var/www/sub
+    file_server
+
+    header {
+        -Server
+        Server "nginx/1.24.0"
+        -Date
+    }
+
+    respond /config.yaml \`<html>
+<head><title>500 Internal Server Error</title></head>
+<body>
+<center><h1>500 Internal Server Error</h1></center>
+<hr><center>nginx/1.24.0</center>
+</body>
+</html>\` 500
+
+    @my_secret_link path /\$INIT_UUID
+    handle @my_secret_link {
+        rewrite * /config.yaml
+        header {
+            Content-Type "text/yaml; charset=utf-8"
+            Content-Disposition "attachment; filename=\"config.yaml\""
+        }
+    }
+
+    fallback {
+        respond \`<html>
+<head><title>500 Internal Server Error</title></head>
+<body>
+<center><h1>500 Internal Server Error</h1></center>
+<hr><center>nginx/1.24.0</center>
+</body>
+</html>\` 500
+    }
+}
+CADDYEOF
+
+# 重置 Caddy 的系统所有者权限
+chown -R caddy:caddy \$SUB_DIR
+chmod 700 \$SUB_DIR
+chmod 600 \$SUB_DIR/config.yaml
+
+# 启动并重启服务
+systemctl daemon-reload
+systemctl enable caddy
+systemctl restart caddy
+
+# 完美生成本地管理快捷方式 dy 脚本，确保内部逻辑闭环，并对 [ -f ] 的逻辑提示做严谨修正
 cat << 'DYEOF' > /usr/local/bin/dy
 #!/bin/bash
 SUB_DIR="/var/www/sub"
 CADDYFILE="/etc/caddy/Caddyfile"
 
-# 自动解析 Caddyfile 获取配置参数
 get_host_info() {
-    local first_line=$(head -n 1 /etc/caddy/Caddyfile | tr -d ' {')
-    if [[ "$first_line" == :* ]]; then
-        local ip=$(curl -s4m5 icanhazip.com || curl -s ifconfig.me)
-        local port=$(echo "$first_line" | sed 's/://')
-        echo "http://${ip}:${port}"
+    local first_line=\$(head -n 1 /etc/caddy/Caddyfile | tr -d ' {')
+    if [[ "\$first_line" == :* ]]; then
+        local ip=\$(curl -s4m5 icanhazip.com || curl -s ifconfig.me)
+        local port=(echo "first_line" | sed 's/://')
+        echo "http://ip:{port}"
     else
-        echo "https://${first_line}"
+        echo "https://\${first_line}"
     fi
 }
 
 get_secret() {
-    local secret=$(grep "path /" /etc/caddy/Caddyfile | head -n1 | awk '{print $2}' | sed 's/\///')
-    echo "${secret:-secret-error}"
+    local secret=\$(grep "path /" /etc/caddy/Caddyfile | head -n1 | awk '{print \$2}' | sed 's/\///')
+    echo "\${secret:-secret-error}"
 }
 
 update_config_menu() {
@@ -31,40 +143,35 @@ update_config_menu() {
     echo "====================================="
     read -p "请选择导入方式 [1-3]: " upload_choice
 
-    case $upload_choice in
+    case \$upload_choice in
         1)
             read -p "请输入配置文件在服务器上的绝对路径 (如 /root/clash.yaml): " file_path
-            if [ -f "$file_path" ]; then
-                cp "$file_path" "$SUB_DIR/config.yaml"
-                chown caddy:caddy "$SUB_DIR/config.yaml"
-                chmod 600 "$SUB_DIR/config.yaml"
+            if [ -f "\$file_path" ]; then
+                cp "\(file_path" "\)SUB_DIR/config.yaml"
+                chown caddy:caddy "\$SUB_DIR/config.yaml"
+                chmod 600 "\$SUB_DIR/config.yaml"
                 echo " [√] 成功从本地 file 文件导入！"
             else
-                echo " [X] 错误：文件不存在！"
+                echo " [X] 错误：文件不存在！请检查路径是否正确。"
             fi
             ;;
         2)
             read -p "请输入合法的远程配置文件 URL: " remote_url
-            if [ -z "$remote_url" ]; then
+            if [ -z "\$remote_url" ]; then
                 echo " [X] URL 不能为空！"
             else
                 echo "正在加密下载..."
-                
-                # 【安全修复 1】使用 mktemp 创建唯一的、高权限保护的临时文件存放配置
-                local tmp_config=$(mktemp /tmp/clash_cfg.XXXXXXXXXX)
-                
-                # 【安全修复 2】直接通过内存变量捕获 HTTP 状态码，彻底废除公共路径的重定向文件
-                # -w "%{http_code}" 打印状态码，-o 将文件内容保存到刚才创建的安全临时文件中
-                local http_status=$(curl -sL -w "%{http_code}" "$remote_url" -o "$tmp_config")
+                local tmp_config=\$(mktemp /tmp/clash_cfg.XXXXXXXXXX)
+                local http_status=\$(curl -sL -w "%{http_code}" "\(remote_url" -o "\)tmp_config")
 
-                if [ "$http_status" -eq 200 ]; then
-                    mv "$tmp_config" "$SUB_DIR/config.yaml"
-                    chown caddy:caddy "$SUB_DIR/config.yaml"
-                    chmod 600 "$SUB_DIR/config.yaml"
+                if [ "\$http_status" -eq 200 ]; then
+                    mv "\(tmp_config" "\)SUB_DIR/config.yaml"
+                    chown caddy:caddy "\$SUB_DIR/config.yaml"
+                    chmod 600 "\$SUB_DIR/config.yaml"
                     echo " [√] 成功从远程下载并导入！"
                 else
-                    rm -f "$tmp_config"
-                    echo " [X] 下载失败，HTTP 状态码: $http_status"
+                    rm -f "\$tmp_config"
+                    echo " [X] 下载失败，HTTP 状态码: \$http_status"
                 fi
             fi
             ;;
@@ -87,14 +194,14 @@ show_menu() {
     echo "====================================="
     read -p "请选择操作 [1-6]: " choice
 
-    case $choice in
+    case \$choice in
         1) update_config_menu ;;
         2)
-            host_base=$(get_host_info)
-            secret=$(get_secret)
+            host_base=\$(get_host_info)
+            secret=\$(get_secret)
             echo "-------------------------------------"
             echo " 你的高安全性订阅链接为："
-            echo -e "\033[32m\033[01m${host_base}/${secret}\033[0m"
+            echo -e "\033[32m\033[01m\({host_base}/\){secret}\033[0m"
             echo ""
             echo " 当前安全防御层级："
             echo " - 自动移除 Caddy 默认特征并伪装成 Nginx/1.24.0"
@@ -107,14 +214,14 @@ show_menu() {
             echo "1. 自动生成随机 UUID 密钥"
             echo "2. 手动输入自定义密钥"
             read -p "请选择 [1-2]: " key_choice
-            if [ "$key_choice" -eq 1 ]; then
-                new_secret=$(cat /proc/sys/kernel/random/uuid)
+            if [ "\$key_choice" -eq 1 ]; then
+                new_secret=\$(cat /proc/sys/kernel/random/uuid)
             else
                 read -p "请输入自定义安全路径密钥（仅限字母数字）: " new_secret
             fi
-            if [ -n "$new_secret" ]; then
-                old_secret=$(get_secret)
-                sed -i "s|path /$old_secret|path /$new_secret|g" /etc/caddy/Caddyfile
+            if [ -n "\$new_secret" ]; then
+                old_secret=\$(get_secret)
+                sed -i "s|path /\(old_secret\vert{}path /\)new_secret|g" /etc/caddy/Caddyfile
                 systemctl restart caddy
                 echo " [√] 密钥已成功更新！"
             fi
@@ -132,3 +239,10 @@ show_menu() {
 show_menu
 DYEOF
 chmod +x /usr/local/bin/dy
+
+green " [√] 环境完全修复成功！"
+EOF
+
+# 2. 赋予执行权限并直接运行本地修复脚本
+chmod +x /tmp/reinstall_dy.sh
+/tmp/reinstall_dy.sh
