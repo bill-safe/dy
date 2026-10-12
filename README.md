@@ -26,41 +26,12 @@
 - 配置文件位于 `/etc/caddy/Caddyfile`
 - 订阅文件目录位于 `/var/www/sub`
 
-## 安装与使用
-
-1. 下载脚本：
+## 安装
+下载脚本：
  
    ```bash
    bash <(curl -sL https://raw.githubusercontent.com/bill-safe/dy/refs/heads/main/dy.sh)
    ```
-
-2. 赋予执行权限并运行：
-
-   ```bash
-   chmod +x dy.sh
-   ./dy.sh
-   ```
-
-3. 脚本执行后，会自动安装命令：
-
-   ```bash
-   dy
-   ```
-
-4. 在交互菜单中选择对应功能：
-
-   - `1`：更新/导入 FLClash 配置文件
-   - `2`：查看当前安全订阅链接
-   - `3`：修改/重置专属安全密钥
-   - `4`：重新配置环境
-   - `5`：重启订阅服务
-   - `6`：退出
-
-## 关键路径
-
-- 可执行命令：`/usr/local/bin/dy`
-- 订阅配置目录：`/var/www/sub`
-- Caddy 配置：`/etc/caddy/Caddyfile`
 
 ## 说明
 
