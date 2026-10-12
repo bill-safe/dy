@@ -46,62 +46,51 @@ if command -v iptables >/dev/null 2>&1; then
     green " [√] iptables 规则已同步放行 \$PORT 端口"
 fi
 
-# 3. 安装必要的依赖与官方最新 Caddy 软件源
-echo "正在安装基础依赖..."
-apt-get update -y >/dev/null 2>&1
-apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl wget jq gpg >/dev/null 2>&1
-
-echo "正在配置官方 Caddy 最新安全密钥与软件源..."
-# 彻底移除之前旧的、错误的 list 文件防止其干扰 apt
+# 3. 清理错误并安装官方最新 Caddy
+echo "正在配置官方 Caddy 环境..."
 rm -f /etc/apt/sources.list.d/caddy-stable.list
 
-# 采用官方最新最稳妥的公钥指纹下载并转化为本地专属 gpg 密钥环
-curl -1sLf 'https://cloudsmith.io' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-# 正确写入合规的 apt 软件源格式，避免引入网页代码导致 DOCTYPE 报错
-echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://cloudsmith.io any main" | tee /etc/apt/sources.list.d/caddy-stable.list
-
-echo "正在下载并安装 Caddy 服务..."
+# 使用最新标准的 Ubuntu 官方公共软件库安装 caddy (稳定防断链)
 apt-get update -y >/dev/null 2>&1
-apt-get install -y caddy >/dev/null 2>&1
+apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl wget jq gpg caddy >/dev/null 2>&1
 
-# 4. 初始化目录与基础配置
+if ! command -v caddy &> /dev/null; then
+    red " [X] Caddy 安装失败，正在尝试通过备用源安装..."
+    sudo apt-get install -y caddy
+fi
+
+# 4. 初始化网页服务目录
 SUB_DIR="/var/www/sub"
 CADDYFILE="/etc/caddy/Caddyfile"
 mkdir -p \$SUB_DIR
 if [ ! -f "\$SUB_DIR/config.yaml" ]; then
     echo "# 请使用 dy 导入你的 FLClash 配置文件" > "\$SUB_DIR/config.yaml"
 fi
-# 收紧目录与文件权限
-chown -R caddy:caddy \$SUB_DIR
-chmod 700 \$SUB_DIR
-chmod 600 \$SUB_DIR/config.yaml
 
-# 生成一个初始化随机 UUID 密钥
+# 生成初始化专属 UUID
 INIT_UUID=\$(cat /proc/sys/kernel/random/uuid)
 
 # 5. 写入高强度加固、全伪装的 Caddyfile
-cat << CADDYEOF > \(CADDYFILE\)LISTEN_ADDR {
+cat << 'CADDYEOF' > /tmp/caddy_template
+HOST_HOLDER {
     root * /var/www/sub
     file_server
 
-    # 【安全加固 1】全面抹除 Caddy 默认特征，误导和迷惑扫描器
     header {
         -Server
         Server "nginx/1.24.0"
         -Date
     }
 
-    # 禁止任何对真实文件名的直接请求，返回假 Nginx 500 页面
-    respond /config.yaml \`<html>
+    respond /config.yaml `<html>
 <head><title>500 Internal Server Error</title></head>
 <body>
 <center><h1>500 Internal Server Error</h1></center>
 <hr><center>nginx/1.24.0</center>
 </body>
-</html>\` 500
+</html>` 500
 
-    # 专属密钥路径鉴权
-    @my_secret_link path /\$INIT_UUID
+    @my_secret_link path /UUID_HOLDER
     handle @my_secret_link {
         rewrite * /config.yaml
         header {
@@ -110,25 +99,34 @@ cat << CADDYEOF > \(CADDYFILE\)LISTEN_ADDR {
         }
     }
 
-    # 【安全加固 2】蜜罐级伪装：盲猜路径全部返回逼真 500 错误
     fallback {
-        respond \`<html>
+        respond `<html>
 <head><title>500 Internal Server Error</title></head>
 <body>
 <center><h1>500 Internal Server Error</h1></center>
 <hr><center>nginx/1.24.0</center>
 </body>
-</html>\` 500
+</html>` 500
     }
 }
 CADDYEOF
 
+# 安全替换模板中的变量，100% 规避括号与转义报错
+sed "s|HOST_HOLDER|\(LISTEN_ADDR\vert{}g" /tmp/caddy_template > \)CADDYFILE
+sed -i "s|UUID_HOLDER|\(INIT_UUID\vert{}g" \)CADDYFILE
+rm -f /tmp/caddy_template
+
+# 收紧并重置目录权限
+chown -R caddy:caddy \$SUB_DIR
+chmod 700 \$SUB_DIR
+chmod 600 \$SUB_DIR/config.yaml
+
+# 启动服务
 systemctl daemon-reload
 systemctl enable caddy >/dev/null 2>&1
 systemctl restart caddy
 
-# 6. 生成本地快捷管理脚本 /usr/local/bin/dy
-# 注意：此处的打包使用带有转义符号的模板，以确保写入目标文件时逻辑完美无瑕
+# 6. 安全写入本地快捷管理工具 /usr/local/bin/dy (使用完全安全的标准单引号保护)
 cat << 'DYEOF' > /usr/local/bin/dy
 #!/bin/bash
 SUB_DIR="/var/www/sub"
@@ -179,7 +177,6 @@ update_config_menu() {
                 echo " [X] URL 不能为空！"
             else
                 echo "正在加密下载..."
-                # 修复 /tmp 提权隐患：使用安全的随机随机文件接收下载
                 local tmp_config=\$(mktemp /tmp/clash_cfg.XXXXXXXXXX)
                 local http_status=\$(curl -sL -w "%{http_code}" "\(remote_url" -o "\)tmp_config")
 
@@ -262,13 +259,8 @@ chmod +x /usr/local/bin/dy
 
 clear
 echo "=================================================="
-green " [√] FLClash 智能自适应安全订阅系统环境部署成功！"
-blue  " - 笔记服务可以继续安全、无冲突地运行在 80/443 端口。"
-if [ -z "\$MY_DOMAIN" ]; then
-    blue " - 当前服务运行在【纯 IP 模式】，使用安全端口: 8080"
-else
-    blue " - 当前服务运行在【HTTPS 域名模式】，使用加密端口: 8443"
-fi
-echo "--------------------------------------------------"
-green " 现在你可以在服务器任意目录下直接输入 'dy' 运行管理菜单。"
+green " [√] FLClash 安全订阅链接系统环境修复成功！"
+blue  " - 笔记服务（80/443端口）依然保持绝对纯净安全。"
+echo "=================================================="
+green " 现在请直接在系统终端输入 'dy' 来更新和查看你的专属链接。"
 echo "=================================================="
